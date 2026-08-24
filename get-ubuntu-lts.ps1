@@ -1,27 +1,37 @@
 <#
 .SYNOPSIS
-    Downloads the latest Ubuntu LTS desktop ISO (x64) and verifies its SHA256 checksum.
-
+    Installs aria2c via winget, downloads the latest Ubuntu LTS desktop ISO
+    using aria2c's multi-connection download, and verifies its SHA256 checksum.
 .NOTES
-    Windows PowerShell does not ship with real GNU wget - "wget" in PowerShell is just
-    an alias for Invoke-WebRequest, and it doesn't support the same flags as Linux wget.
-    This script uses Invoke-WebRequest directly so it works out of the box.
-
     Run it with:
         powershell -ExecutionPolicy Bypass -File .\get-ubuntu-lts.ps1
 #>
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"   # avoid the slow progress-bar overhead
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-Write-Host "Looking up the latest Ubuntu LTS version..."
+Write-Host "== Step 1: Ensure aria2c is installed =="
+$aria2 = Get-Command aria2c -ErrorAction SilentlyContinue
+if (-not $aria2) {
+    Write-Host "aria2c not found. Installing via winget..."
+    winget install --id aria2.aria2 -e --accept-source-agreements --accept-package-agreements
 
-# releases.ubuntu.com lists every release directory (e.g. "26.04/") along with a
-# description like "Ubuntu 26.04 LTS (Resolute Raccoon)". We scrape that listing,
-# find every plain "NN.04/" entry that's tagged LTS, and take the highest version.
+    # winget installs are picked up on new PATH sessions, so refresh PATH in-process
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + `
+                [System.Environment]::GetEnvironmentVariable("Path","User")
+
+    $aria2 = Get-Command aria2c -ErrorAction SilentlyContinue
+    if (-not $aria2) {
+        throw "aria2c installed but not found on PATH. Try opening a new terminal and re-running."
+    }
+} else {
+    Write-Host "aria2c already installed."
+}
+
+Write-Host "`n== Step 2: Find the latest Ubuntu LTS version =="
 $indexHtml = (Invoke-WebRequest -Uri "https://releases.ubuntu.com/" -UseBasicParsing).Content
 $plainText = $indexHtml -replace '<[^>]+>', ' '
-
 $pattern = '(\d{2}\.04)/\s+\S+\s+\S+\s+-\s+Ubuntu\s+\1(?:\.\d+)?\s+LTS'
 $ltsMatches = [regex]::Matches($plainText, $pattern)
 
@@ -42,17 +52,18 @@ $isoUrl   = "$baseUrl/$isoName"
 $sumsUrl  = "$baseUrl/SHA256SUMS"
 $sumsFile = "SHA256SUMS"
 
-Write-Host "`nDownloading ISO:"
+Write-Host "`n== Step 3: Download the ISO with aria2c (16 connections) =="
 Write-Host "  $isoUrl"
-Invoke-WebRequest -Uri $isoUrl -OutFile $isoName
+aria2c -x16 -s16 -o $isoName $isoUrl
+if ($LASTEXITCODE -ne 0) {
+    throw "aria2c failed with exit code $LASTEXITCODE"
+}
 
-Write-Host "`nDownloading checksum file:"
-Write-Host "  $sumsUrl"
+Write-Host "`n== Step 4: Download the checksum file =="
 Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsFile
 
-Write-Host "`nVerifying checksum..."
+Write-Host "`n== Step 5: Verify checksum =="
 $expectedLine = Get-Content $sumsFile | Where-Object { $_ -match [regex]::Escape($isoName) }
-
 if (-not $expectedLine) {
     throw "No checksum entry found for $isoName in $sumsFile."
 }
